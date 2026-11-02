@@ -101,6 +101,18 @@ static inline void *rv_aligned_alloc(size_t align, size_t size) {
     return _aligned_malloc((size + align - 1) / align * align, align);
 }
 static inline void rv_aligned_free(void *p) { _aligned_free(p); }
+#elif defined(__ANDROID__)
+/* Android API 24 does not expose C11 aligned_alloc() in the NDK headers.
+ * posix_memalign() is available from Android API 17 and is compatible with
+ * free(), so use it for Android builds (including API 24+).
+ */
+static inline void *rv_aligned_alloc(size_t align, size_t size) {
+    void *ptr = NULL;
+    size = (size + align - 1) / align * align;
+    if (posix_memalign(&ptr, align, size) != 0) return NULL;
+    return ptr;
+}
+static inline void rv_aligned_free(void *p) { free(p); }
 #else
 static inline void *rv_aligned_alloc(size_t align, size_t size) {
     return aligned_alloc(align, (size + align - 1) / align * align);

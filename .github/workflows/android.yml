@@ -1,0 +1,59 @@
+name: Android ARM64
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'nnue/**'
+      - 'nets/**'
+      - 'Makefile'
+      - '.github/workflows/android.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Locate Android NDK
+        id: ndk
+        shell: bash
+        run: |
+          NDK="${ANDROID_NDK_LATEST_HOME:-}"
+          if [ -z "$NDK" ] || [ ! -x "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang" ]; then
+            NDK="$(find "$ANDROID_HOME/ndk" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
+          fi
+          test -n "$NDK"
+          CC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
+          test -x "$CC"
+          echo "ndk=$NDK" >> "$GITHUB_OUTPUT"
+          echo "cc=$CC" >> "$GITHUB_OUTPUT"
+          "$CC" --version
+
+      - name: Verify embedded NNUE network
+        run: |
+          test -s nets/Ravager_NET.nnue || { echo "Missing nets/Ravager_NET.nnue. Add the network to the repository or configure Git LFS."; exit 1; }
+
+      - name: Build ARM64 NEON binary
+        run: |
+          make clean
+          make android-arm64 CC="${{ steps.ndk.outputs.cc }}"
+          file ravager-android-arm64-neon
+          readelf -h ravager-android-arm64-neon | grep -E 'Class:|Machine:'
+          readelf -l ravager-android-arm64-neon | grep 'Requesting program interpreter'
+          test "$(stat -c%s ravager-android-arm64-neon)" -gt 89000000
+
+      - name: Upload Android ARM64 binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ravager-android-arm64-neon
+          path: ravager-android-arm64-neon
+          if-no-files-found: error

@@ -52,9 +52,7 @@ windows: $(SRC) $(wildcard src/*.h src/tb/*.h nnue/*.h) $(EVALFILE)
 # Android ARM64 (ARMv8.2-A + dotprod / NEON). Set CC to the Android NDK
 # API-level clang wrapper, e.g. aarch64-linux-android24-clang.
 android-arm64: $(SRC) $(wildcard src/*.h src/tb/*.h nnue/*.h) $(EVALFILE)
-	$(CC) $(CPPFLAGS) -O3 -std=c11 -Wall -Wextra -Wno-unused-parameter -Wno-missing-braces \\
-		-pthread -march=armv8.2-a+dotprod -mtune=cortex-a76 \\
-		-o $(ANDROID) $(SRC) $(LDLIBS)
+	$(CC) $(CPPFLAGS) -O3 -std=c11 -Wall -Wextra -Wno-unused-parameter -Wno-missing-braces -pthread -march=armv8.2-a+dotprod -mtune=cortex-a76 -o $(ANDROID) $(SRC) $(LDLIBS)
 
 bench: $(TARGET)
 	./$(TARGET) bench

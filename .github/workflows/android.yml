@@ -78,7 +78,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          make clean
+          # Do not run `make clean` here: the Makefile clean target removes
+          # both Android outputs, including the NEON binary built above.
+          # Each Android target compiles directly to a distinct output file.
           make android-arm64-dotprod CC="${{ steps.ndk.outputs.cc }}"
           file ravager-android-arm64-dotprod
           readelf -h ravager-android-arm64-dotprod | grep -E 'Class:|Machine:'

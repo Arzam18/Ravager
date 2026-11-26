@@ -1,0 +1,106 @@
+name: Build Ravager Android ARM64 NEON and DotProd
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'nnue/**'
+      - 'nets/**'
+      - 'Makefile'
+      - '.github/workflows/android.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Android ARM64 variants
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source and NNUE assets
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Locate Android NDK
+        id: ndk
+        shell: bash
+        run: |
+          set -euo pipefail
+          NDK="${ANDROID_NDK_LATEST_HOME:-}"
+          if [ -z "$NDK" ] || [ ! -x "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang" ]; then
+            SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+            test -n "$SDK_ROOT" || { echo "Android SDK root was not found on this runner."; exit 1; }
+            NDK="$(find "$SDK_ROOT/ndk" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -n 1)"
+          fi
+          test -n "$NDK" || { echo "Android NDK was not found."; exit 1; }
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          CC="$TOOLCHAIN/aarch64-linux-android24-clang"
+          OBJDUMP="$TOOLCHAIN/llvm-objdump"
+          test -x "$CC" || { echo "Missing Android API 24 compiler: $CC"; exit 1; }
+          test -x "$OBJDUMP" || { echo "Missing NDK llvm-objdump: $OBJDUMP"; exit 1; }
+          echo "ndk=$NDK" >> "$GITHUB_OUTPUT"
+          echo "cc=$CC" >> "$GITHUB_OUTPUT"
+          echo "objdump=$OBJDUMP" >> "$GITHUB_OUTPUT"
+          "$CC" --version
+
+      - name: Verify embedded NNUE network
+        shell: bash
+        run: |
+          set -euo pipefail
+          NET="nets/Ravager_NET.nnue"
+          EXPECTED_SIZE=89315360
+          test -s "$NET" || {
+            echo "Missing $NET. The repository must contain the Ravager 3 network (tracked file or Git LFS)."
+            exit 1
+          }
+          ACTUAL_SIZE="$(stat -c%s "$NET")"
+          echo "$NET: $ACTUAL_SIZE bytes"
+          test "$ACTUAL_SIZE" -eq "$EXPECTED_SIZE" || {
+            echo "Wrong NNUE size: expected $EXPECTED_SIZE bytes, got $ACTUAL_SIZE."
+            exit 1
+          }
+
+      - name: Build baseline ARM64 NEON binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          make clean
+          make android-arm64-neon CC="${{ steps.ndk.outputs.cc }}"
+          file ravager-android-arm64-neon
+          readelf -h ravager-android-arm64-neon | grep -E 'Class:|Machine:'
+          readelf -l ravager-android-arm64-neon | grep 'Requesting program interpreter'
+          test "$(stat -c%s ravager-android-arm64-neon)" -gt 89000000
+
+      - name: Build ARM64 DotProd binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          make clean
+          make android-arm64-dotprod CC="${{ steps.ndk.outputs.cc }}"
+          file ravager-android-arm64-dotprod
+          readelf -h ravager-android-arm64-dotprod | grep -E 'Class:|Machine:'
+          readelf -l ravager-android-arm64-dotprod | grep 'Requesting program interpreter'
+          test "$(stat -c%s ravager-android-arm64-dotprod)" -gt 89000000
+          "${{ steps.ndk.outputs.objdump }}" -d --section=.text ravager-android-arm64-dotprod > /tmp/ravager-dotprod-disassembly.txt
+          grep -Eiq '[[:space:]]sdot[[:space:]]' /tmp/ravager-dotprod-disassembly.txt || {
+            echo "DotProd build did not contain an SDOT instruction."
+            exit 1
+          }
+          echo "Verified ARM SDOT instruction in DotProd executable."
+
+      - name: Upload Android ARM64 NEON binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ravager-android-arm64-neon
+          path: ravager-android-arm64-neon
+          if-no-files-found: error
+
+      - name: Upload Android ARM64 DotProd binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ravager-android-arm64-dotprod
+          path: ravager-android-arm64-dotprod
+          if-no-files-found: error

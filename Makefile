@@ -27,6 +27,8 @@ DEP := $(OBJ:.o=.d)
 TARGET  := ravager
 RELEASE := ravager-linux-x64-avx2
 WINDOWS := ravager-windows-x64-avx2.exe
+ANDROID_NEON := ravager-android-arm64-neon
+ANDROID_DOTPROD := ravager-android-arm64-dotprod
 
 all: $(TARGET)
 
@@ -47,6 +49,14 @@ release:
 windows: $(SRC) $(wildcard src/*.h src/tb/*.h nnue/*.h) $(EVALFILE)
 	x86_64-w64-mingw32-gcc $(CPPFLAGS) -O3 -std=c11 -pthread $(PORTABLE_FLAGS) \
 		-o $(WINDOWS) $(SRC) $(LDLIBS) -static -s
+
+# Android ARM64 API 24. Baseline is safe for ARMv8-A NEON devices.
+android-arm64-neon: $(SRC) $(wildcard src/*.h src/tb/*.h nnue/*.h) $(EVALFILE)
+	$(CC) $(CPPFLAGS) -O3 -std=c11 -Wall -Wextra -Wno-unused-parameter -Wno-missing-braces -D_POSIX_C_SOURCE=200809L -pthread -march=armv8-a+simd -mtune=cortex-a53 -o $(ANDROID_NEON) $(SRC) $(LDLIBS)
+
+# Separate build: requires an ARMv8.2-A CPU with the DotProd extension.
+android-arm64-dotprod: $(SRC) $(wildcard src/*.h src/tb/*.h nnue/*.h) $(EVALFILE)
+	$(CC) $(CPPFLAGS) -O3 -std=c11 -Wall -Wextra -Wno-unused-parameter -Wno-missing-braces -D_POSIX_C_SOURCE=200809L -pthread -march=armv8.2-a+dotprod -mtune=cortex-a76 -o $(ANDROID_DOTPROD) $(SRC) $(LDLIBS)
 
 bench: $(TARGET)
 	./$(TARGET) bench
@@ -71,7 +81,7 @@ test: $(TEST_BINS)
 	./tests/tablebase-test$(TEST_EXT)
 
 clean:
-	rm -f $(OBJ) $(DEP) $(TARGET) $(RELEASE) $(WINDOWS) $(TEST_BINS)
+	rm -f $(OBJ) $(DEP) $(TARGET) $(RELEASE) $(WINDOWS) $(ANDROID_NEON) $(ANDROID_DOTPROD) $(TEST_BINS)
 
 -include $(DEP)
-.PHONY: all release windows bench test clean
+.PHONY: all release windows android-arm64-neon android-arm64-dotprod bench test clean

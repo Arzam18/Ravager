@@ -23,7 +23,23 @@
 #define _GNU_SOURCE
 #include "inference.h"
 #include "bitboard.h"
+#if defined(__x86_64__) || defined(__i386__)
 #include <immintrin.h>
+#define RV_X86_SIMD 1
+#else
+#define RV_X86_SIMD 0
+#endif
+#if defined(__aarch64__) && defined(__ARM_NEON)
+#include <arm_neon.h>
+#define RV_ARM_NEON 1
+#else
+#define RV_ARM_NEON 0
+#endif
+#if defined(__aarch64__) && defined(__ARM_FEATURE_DOTPROD)
+#define RV_ARM_DOTPROD 1
+#else
+#define RV_ARM_DOTPROD 0
+#endif
 #include <assert.h>
 #include <stdlib.h>
 #include <math.h>
@@ -216,6 +232,38 @@ static void aux_rows_scalar(int16_t *dst, const int16_t *src, const RowOps *o) {
     for (int r = 0; r < o->nsub; r++) for (int j = 0; j < WIDTH; j++) dst[j] = wrap(dst[j] - aw[(size_t)o->sub[r] * WIDTH + j]);
 }
 
+#if RV_ARM_NEON
+/* ARM NEON row updates; int8 threat weights are sign-extended before addition. */
+static void psqt_rows_neon(int16_t *dst, const int16_t *src, const RowOps *o) {
+    if (dst != src) memcpy(dst, src, WIDTH * sizeof(int16_t));
+    for (int r = 0; r < o->nadd; r++) {
+        const int16_t *row = pw + (size_t)o->add[r] * WIDTH;
+        for (int j = 0; j < WIDTH; j += 8)
+            vst1q_s16(dst + j, vaddq_s16(vld1q_s16(dst + j), vld1q_s16(row + j)));
+    }
+    for (int r = 0; r < o->nsub; r++) {
+        const int16_t *row = pw + (size_t)o->sub[r] * WIDTH;
+        for (int j = 0; j < WIDTH; j += 8)
+            vst1q_s16(dst + j, vsubq_s16(vld1q_s16(dst + j), vld1q_s16(row + j)));
+    }
+}
+
+static void aux_rows_neon(int16_t *dst, const int16_t *src, const RowOps *o) {
+    if (dst != src) memcpy(dst, src, WIDTH * sizeof(int16_t));
+    for (int r = 0; r < o->nadd; r++) {
+        const int8_t *row = aw + (size_t)o->add[r] * WIDTH;
+        for (int j = 0; j < WIDTH; j += 8)
+            vst1q_s16(dst + j, vaddq_s16(vld1q_s16(dst + j), vmovl_s8(vld1_s8(row + j))));
+    }
+    for (int r = 0; r < o->nsub; r++) {
+        const int8_t *row = aw + (size_t)o->sub[r] * WIDTH;
+        for (int j = 0; j < WIDTH; j += 8)
+            vst1q_s16(dst + j, vsubq_s16(vld1q_s16(dst + j), vmovl_s8(vld1_s8(row + j))));
+    }
+}
+#endif
+
+#if RV_X86_SIMD
 /* Pull the next tile of every touched row toward the core while summing the current one. */
 static inline void prefetch_rows(const char *base, size_t rowbytes, const RowOps *o, size_t off, size_t span) {
     for (int r = 0; r < o->nadd; r++) { const char *q = base + (size_t)o->add[r] * rowbytes + off; for (size_t k = 0; k < span; k += 64) __builtin_prefetch(q + k, 0, 3); }
@@ -353,16 +401,16 @@ static void aux_rows_avx512(int16_t *dst, const int16_t *src, const RowOps *o) {
     }
 }
 
+#endif /* RV_X86_SIMD */
+
 static void (*psqt_rows)(int16_t *, const int16_t *, const RowOps *) = psqt_rows_scalar;
 static void (*aux_rows)(int16_t *, const int16_t *, const RowOps *) = aux_rows_scalar;
 
 static uint64_t square_diff(const uint8_t *x, const uint8_t *y) {
-    uint64_t m = 0;
-    for (int i = 0; i < 4; i++) {
-        __m128i e = _mm_cmpeq_epi8(_mm_loadu_si128((const void *)(x + i * 16)), _mm_loadu_si128((const void *)(y + i * 16)));
-        m |= (uint64_t)(~(unsigned)_mm_movemask_epi8(e) & 0xffffu) << (i * 16);
-    }
-    return m;
+    uint64_t changed = 0;
+    for (int i = 0; i < 64; i++)
+        if (x[i] != y[i]) changed |= UINT64_C(1) << i;
+    return changed;
 }
 
 /* Piece-square accumulator from scratch (verification and fresh frames). */
@@ -499,6 +547,7 @@ static int finish_scalar(const int32_t *s, int bucket) {
     return (int)(y * 240.0f);
 }
 
+#if RV_X86_SIMD
 /* Eight-lane float head; the FMA order matches finish_scalar exactly. */
 __attribute__((target("avx2,fma")))
 static int finish_avx2(const int32_t *s, int bucket) {
@@ -532,6 +581,8 @@ static int finish_avx2(const int32_t *s, int bucket) {
     return (int)((_mm_cvtss_f32(t) + b3[bucket]) * 240.0f);
 }
 
+#endif /* RV_X86_SIMD */
+
 static inline int output_bucket(const Board *b) { return (popcount(b->occ_all) - 2) / 4; }
 
 /* Pairwise CReLU product of the summed accumulators, stm half first. */
@@ -546,6 +597,7 @@ static void activate_scalar(const Frame *f, const Board *b, uint8_t *x) {
     }
 }
 
+#if RV_X86_SIMD
 __attribute__((target("avx2")))
 static void activate_avx2(const Frame *f, const Board *b, uint8_t *x) {
     const __m256i zero = _mm256_setzero_si256(), cap = _mm256_set1_epi16(255);
@@ -568,6 +620,8 @@ static void activate_avx2(const Frame *f, const Board *b, uint8_t *x) {
     }
 }
 
+#endif /* RV_X86_SIMD */
+
 static int forward_scalar(const Frame *f, const Board *b) {
     uint8_t x[WIDTH];
     activate_scalar(f, b, x);
@@ -578,6 +632,38 @@ static int forward_scalar(const Frame *f, const Board *b) {
     return finish_scalar(s, bucket);
 }
 
+#if RV_ARM_DOTPROD
+/*
+ * ARM SDOT kernel for the sparse 1024 -> 32 int8 layer.
+ * Each activation is in [0,127] because (255*255)>>9 == 127, so it is
+ * representable as signed int8 without changing the dot-product result.
+ * Four input bytes are broadcast across four output groups; each SDOT lane
+ * computes one output neuron from its corresponding four weights.
+ */
+static int forward_dotprod(const Frame *f, const Board *b) {
+    uint8_t x[WIDTH];
+    activate_scalar(f, b, x);
+    int bucket = output_bucket(b);
+    int32x4_t sums[8];
+    for (int j = 0; j < 8; j++) sums[j] = vdupq_n_s32(0);
+
+    for (int g = 0; g < WIDTH / 4; g++) {
+        uint32_t bits;
+        memcpy(&bits, x + g * 4, sizeof bits);
+        if (bits == 0) continue;
+        int8x16_t input = vreinterpretq_s8_u32(vdupq_n_u32(bits));
+        const int8_t *weights = w1[bucket] + g * 128;
+        for (int j = 0; j < 8; j++)
+            sums[j] = vdotq_s32(sums[j], input, vld1q_s8(weights + j * 16));
+    }
+
+    int32_t result[32];
+    for (int j = 0; j < 8; j++) vst1q_s32(result + j * 4, sums[j]);
+    return finish_scalar(result, bucket);
+}
+#endif
+
+#if RV_X86_SIMD
 /* Indices of the 4-byte input groups with any nonzero byte, ascending. */
 __attribute__((target("avx2")))
 static inline int nonzero_groups(const uint8_t *x, uint16_t *idx) {
@@ -677,6 +763,8 @@ static int forward_vnni(const Frame *f, const Board *b) {
     return finish_avx2(sums, bucket);
 }
 
+#endif /* RV_X86_SIMD */
+
 static int (*forward)(const Frame *, const Board *) = forward_scalar;
 
 /* ---- loading ---- */
@@ -744,6 +832,7 @@ bool net_load(const unsigned char *bytes, size_t count) {
     aux_rows = aux_rows_scalar;
     forward = forward_scalar;
     net_tier = "scalar";
+#if RV_X86_SIMD
     if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma")) {
         psqt_rows = psqt_rows_avx2;
         aux_rows = aux_rows_avx2;
@@ -760,6 +849,18 @@ bool net_load(const unsigned char *bytes, size_t count) {
         net_tier = "avx512";
         if (__builtin_cpu_supports("avx512vnni")) { forward = forward_vnni; net_tier = "avx512-vnni"; }
     }
+#elif RV_ARM_NEON
+    psqt_rows = psqt_rows_neon;
+    aux_rows = aux_rows_neon;
+#if RV_ARM_DOTPROD
+    forward = forward_dotprod;
+    net_tier = "arm-dotprod";
+#else
+    net_tier = "arm-neon";
+#endif
+#else
+    net_tier = "scalar";
+#endif
     network_generation++;
     for (int i = 0; i < FRAMES; i++) { frames[i].ready = false; frame_source[i] = i; }
     return true;

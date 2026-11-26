@@ -105,6 +105,15 @@ static inline void *rv_aligned_alloc(size_t align, size_t size) {
     return _aligned_malloc((size + align - 1) / align * align, align);
 }
 static inline void rv_aligned_free(void *p) { _aligned_free(p); }
+#elif defined(__ANDROID__)
+/* Android API 24 compatibility: posix_memalign is available and free-compatible. */
+static inline void *rv_aligned_alloc(size_t align, size_t size) {
+    void *ptr = NULL;
+    size = (size + align - 1) / align * align;
+    if (posix_memalign(&ptr, align, size) != 0) return NULL;
+    return ptr;
+}
+static inline void rv_aligned_free(void *p) { free(p); }
 #else
 static inline void *rv_aligned_alloc(size_t align, size_t size) {
     return aligned_alloc(align, (size + align - 1) / align * align);
